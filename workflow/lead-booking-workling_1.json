@@ -1,0 +1,350 @@
+{
+  "name": "Lead & Booking Workling — Hackathon Demo",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7ab8cc70-8a21-41c5-b334-5892eb7ed153",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1216,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Carga de prueba fija para poder ejecutar el workflow sin depender del\n * formulario. Es la ruta de respaldo documentada en el plan operativo.\n */\nreturn [{\n  json: {\n    'Customer name': 'Demo Customer',\n    'Email': 'customer@example.com',\n    'Phone': '+34600000000',\n    'Message': 'Hi, do you have a 6-seat van available from 12-19 August for 2 adults and 2 kids?'\n  }\n}];"
+      },
+      "id": "93acb297-1e9f-4e8b-8d96-9d3cd2e01cfb",
+      "name": "Sample Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "worklings-booking-request",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "aaf03ca0-2d13-4e8b-9a5c-bac3900f8790",
+      "name": "Webhook Booking Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        480
+      ],
+      "webhookId": "lead-booking-workling-demo-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODO: Normalize Inbound Request\n * MODO: Run Once for All Items (modo por defecto de n8n)\n *\n * Convierte cualquier entrada (webhook del Google Form o Manual Trigger) en el\n * contrato canonico que consume el resto del workflow, e inyecta la\n * trazabilidad: trace_id, client_id y organization_id.\n *\n * Es el unico punto donde se normaliza. Anadir un canal nuevo (WhatsApp, email)\n * solo requiere que envie al webhook; nada aguas abajo cambia.\n */\n\n// $input.first() en lugar de $json: $json no esta disponible en el modo\n// \"Run Once for All Items\", que es el modo por defecto del nodo Code.\nconst entrada = $input.first().json;\n\n// El webhook envuelve el cuerpo en .body; el Manual Trigger no.\nconst datos = entrada.body || entrada;\n\n/** Devuelve el primer valor no vacio de los que se le pasen. */\nfunction primero(...valores) {\n  for (const v of valores) {\n    if (v !== undefined && v !== null && String(v).trim() !== '') {\n      return String(v).trim();\n    }\n  }\n  return '';\n}\n\nreturn [{\n  json: {\n    // --- Contexto de tenant y trazabilidad -------------------------------\n    client_id: 'demo_tourism_operator',\n    organization_id: 'worklings_demo',\n    trace_id: String($execution.id),\n    source_channel: primero(datos.source_channel, 'manual_test'),\n    received_at: new Date().toISOString(),\n\n    // --- Datos del cliente: se aceptan varias grafias de clave -----------\n    customer_name: primero(datos['Customer name'], datos.customer_name, datos.name),\n    customer_email: primero(datos['Email'], datos.customer_email, datos.email),\n    customer_phone: primero(datos['Phone'], datos.customer_phone, datos.phone),\n    raw_message: primero(datos['Message'], datos.message, datos.raw_message, datos.text),\n\n    // --- Modo de operacion: constante, no negociable ---------------------\n    response_mode: 'human_approval_required',\n    customer_message_sent: false\n  }\n}];"
+      },
+      "id": "9a3bcb29-590c-4d78-9054-e36f1d8e2450",
+      "name": "Normalize Inbound Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.1, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: \"You are the Lead & Booking Workling for a tourism or hospitality operator.\\n\\nYour job is to process an inbound customer request and convert it into a structured lead, a booking intent signal, a missing-information checklist, a human handoff summary, a recommended next action, and a safe draft reply for human approval.\\n\\nYou are not a chatbot. You operate the workflow.\\n\\nCRITICAL SAFETY RULES:\\n- Never state or imply that availability is confirmed.\\n- Never confirm price, reservation, booking, payment, pickup, or vehicle assignment.\\n- Never address the customer as if sending. You only draft.\\n- Always operate in human-approval / draft-only mode.\\n- Use ONLY information present in the inbound message. Never invent details.\\n- If a detail is absent, list it in missing_information. Do not guess it.\\n- If the message contains a date without a year, set dates.needs_year_confirmation to true and leave dates.start and dates.end empty.\\n- If the request is too vague to classify, set service_type.label to \\\"unknown\\\" with confidence 0. Do not pick a plausible service.\\n- Return valid JSON only. No markdown. No code fences. No commentary.\\n\\nBUSINESS CONTEXT:\\nThe company handles tourism booking requests: van rental, tours, activities, experiences, mobility and hospitality services. The operator wants visibility, qualification, human handoff and safe follow-up.\\n\\nFIELD RULES:\\n- language: ISO 639-1 code of the customer message, e.g. \\\"en\\\", \\\"es\\\", \\\"pt\\\".\\n- All confidence values and booking_intent.score: a number between 0 and 1.\\n- booking_intent.label: exactly one of \\\"low\\\", \\\"medium\\\", \\\"high\\\".\\n- urgency.label: exactly one of \\\"low\\\", \\\"medium\\\", \\\"high\\\".\\n- lead_status: exactly one of \\\"new_lead\\\", \\\"needs_human_review\\\", \\\"needs_clarification\\\", \\\"low_intent\\\".\\n- missing_information: an array of lowercase snake_case strings, for example [\\\"pickup_location\\\", \\\"pickup_time\\\", \\\"year_confirmation\\\", \\\"availability_confirmation\\\"]. Never a sentence. Never a single string.\\n- group_size numbers: integers, or null if not stated.\\n- safe_customer_reply_draft: polite, asks for the missing details, and never confirms availability, price or booking.\\n\\nTASKS:\\n1. Identify service_type.\\n2. Extract dates.\\n3. Extract group_size.\\n4. Identify customer intent.\\n5. Score booking intent.\\n6. Identify missing information.\\n7. Determine urgency.\\n8. Recommend the next operational action for the internal team.\\n9. Prepare a human handoff summary.\\n10. Draft a safe customer response for human approval.\\n\\nOUTPUT:\\nReturn exactly one JSON object matching this schema:\\n\\n{\\n  \\\"client_id\\\": \\\"\\\",\\n  \\\"organization_id\\\": \\\"\\\",\\n  \\\"trace_id\\\": \\\"\\\",\\n  \\\"response_mode\\\": \\\"human_approval_required\\\",\\n  \\\"source_channel\\\": \\\"\\\",\\n  \\\"received_at\\\": \\\"\\\",\\n  \\\"customer\\\": { \\\"name\\\": \\\"\\\", \\\"email\\\": \\\"\\\", \\\"phone\\\": \\\"\\\" },\\n  \\\"original_message\\\": \\\"\\\",\\n  \\\"language\\\": \\\"\\\",\\n  \\\"service_type\\\": { \\\"label\\\": \\\"\\\", \\\"confidence\\\": 0, \\\"evidence\\\": \\\"\\\" },\\n  \\\"dates\\\": { \\\"start\\\": \\\"\\\", \\\"end\\\": \\\"\\\", \\\"raw\\\": \\\"\\\", \\\"confidence\\\": 0, \\\"needs_year_confirmation\\\": false },\\n  \\\"group_size\\\": { \\\"total\\\": null, \\\"adults\\\": null, \\\"children\\\": null, \\\"raw\\\": \\\"\\\", \\\"confidence\\\": 0 },\\n  \\\"customer_intent\\\": { \\\"label\\\": \\\"\\\", \\\"summary\\\": \\\"\\\", \\\"confidence\\\": 0 },\\n  \\\"booking_intent\\\": { \\\"label\\\": \\\"low\\\", \\\"score\\\": 0, \\\"reason\\\": \\\"\\\" },\\n  \\\"urgency\\\": { \\\"label\\\": \\\"low\\\", \\\"reason\\\": \\\"\\\" },\\n  \\\"missing_information\\\": [],\\n  \\\"recommended_next_action\\\": \\\"\\\",\\n  \\\"lead_status\\\": \\\"new_lead\\\",\\n  \\\"handoff_required\\\": true,\\n  \\\"handoff_reason\\\": \\\"\\\",\\n  \\\"human_handoff_summary\\\": \\\"\\\",\\n  \\\"calendar_action\\\": { \\\"create_internal_event\\\": true, \\\"title\\\": \\\"\\\", \\\"description\\\": \\\"\\\", \\\"suggested_duration_minutes\\\": 15 },\\n  \\\"safe_customer_reply_draft\\\": \\\"\\\",\\n  \\\"audit\\\": { \\\"customer_message_sent\\\": false, \\\"draft_created\\\": true, \\\"availability_confirmed\\\": false, \\\"price_confirmed\\\": false, \\\"booking_confirmed\\\": false, \\\"requires_human_approval\\\": true }\\n}\" }, { role: 'user', content: 'INBOUND REQUEST:\\n' + JSON.stringify({ client_id: $json.client_id, organization_id: $json.organization_id, trace_id: $json.trace_id, source_channel: $json.source_channel, received_at: $json.received_at, customer_name: $json.customer_name, customer_email: $json.customer_email, customer_phone: $json.customer_phone, message: $json.raw_message }, null, 2) } ]}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "9f4f45f0-2a69-489d-9e8f-60032968a8a4",
+      "name": "LLM Extraction + Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        384
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODO: Validate Agent Output\n * MODO: Run Once for All Items (modo por defecto de n8n)\n *\n * POR QUE EXISTE ESTE NODO\n * La respuesta de un LLM no es un contrato fiable: puede llegar envuelta en\n * markdown, con campos ausentes, con un array convertido en string, o sin ser\n * JSON en absoluto. Los nodos posteriores (Sheets, Calendar, Slack) leen rutas\n * anidadas como $json.service_type.label y reventarian en cualquiera de esos\n * casos, tumbando la demo en directo.\n *\n * Este nodo es la frontera de fiabilidad del workflow y garantiza tres cosas:\n *\n *   1. FORMA         La salida tiene SIEMPRE la misma estructura completa,\n *                    aunque el modelo devuelva basura. Nada aguas abajo rompe.\n *   2. TRAZABILIDAD  trace_id, client_id y organization_id se recuperan del\n *                    nodo Normalize y no de la respuesta del modelo, asi que no\n *                    se pierden aunque el LLM los omita.\n *   3. SEGURIDAD     Las banderas de confirmacion y de envio se fuerzan a false\n *                    aqui, en codigo. No dependen de que el modelo se porte bien.\n *\n * Resultado: si el LLM falla, el lead entra igualmente en Sheets y el equipo\n * recibe igualmente el aviso en Slack, marcado como needs_human_review.\n * El sistema degrada, no se cae.\n */\n\n// Nombre exacto del nodo de normalizacion. Cambiar aqui si se renombra.\nconst NODO_NORMALIZE = 'Normalize Inbound Request';\n\n// ---------------------------------------------------------------------------\n// Contexto de origen\n// ---------------------------------------------------------------------------\nlet origen = {};\ntry {\n  origen = $(NODO_NORMALIZE).first().json || {};\n} catch (error) {\n  origen = {};\n}\n\n// ---------------------------------------------------------------------------\n// Utilidades de saneado\n// ---------------------------------------------------------------------------\n\n/** Localiza el texto de la respuesta del LLM, venga en el campo que venga. */\nfunction extraerRespuestaLLM(item) {\n  if (!item) return null;\n  return (\n    item.choices?.[0]?.message?.content ??\n    item.message?.content ??\n    item.text ??\n    item.output ??\n    item.content ??\n    null\n  );\n}\n\n/** Parsea JSON tolerando vallas de markdown y texto alrededor. */\nfunction parsearJSON(valor) {\n  if (valor === null || valor === undefined) return null;\n  if (typeof valor === 'object') return valor;\n\n  const limpio = String(valor)\n    .replace(/^\\s*```(?:json)?/i, '')\n    .replace(/```\\s*$/, '')\n    .trim();\n\n  try {\n    return JSON.parse(limpio);\n  } catch (error) {\n    // Segundo intento: quedarse con el primer bloque {...} que aparezca.\n    const inicio = limpio.indexOf('{');\n    const fin = limpio.lastIndexOf('}');\n    if (inicio === -1 || fin === -1 || fin <= inicio) return null;\n    try {\n      return JSON.parse(limpio.slice(inicio, fin + 1));\n    } catch (errorSegundoIntento) {\n      return null;\n    }\n  }\n}\n\nconst esObjeto = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst aObjeto = (v) => (esObjeto(v) ? v : {});\n\nconst aTexto = (v, porDefecto = '') =>\n  typeof v === 'string' && v.trim() !== '' ? v.trim() : porDefecto;\n\nconst aNumero = (v, porDefecto = 0) => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : porDefecto;\n};\n\nconst aEnteroONulo = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  const n = Number(v);\n  return Number.isInteger(n) ? n : null;\n};\n\n/** Convierte a array de strings. Acepta array, string suelto o coma-separado. */\nconst aLista = (v) => {\n  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);\n  if (typeof v === 'string' && v.trim() !== '') {\n    return v.split(',').map((x) => x.trim()).filter(Boolean);\n  }\n  return [];\n};\n\n/** Fuerza el valor a uno de los permitidos. */\nconst aEnumerado = (v, permitidos, porDefecto) => {\n  const t = aTexto(v).toLowerCase();\n  return permitidos.includes(t) ? t : porDefecto;\n};\n\n// ---------------------------------------------------------------------------\n// Construccion del objeto de salida con forma garantizada\n// ---------------------------------------------------------------------------\n\n// Campos que el LLM deberia haber devuelto. Los que falten se registran en\n// validation_missing_fields: es la senal de evaluacion del reliability brief.\nconst CAMPOS_ESPERADOS = [\n  'language',\n  'service_type',\n  'dates',\n  'group_size',\n  'customer_intent',\n  'booking_intent',\n  'urgency',\n  'missing_information',\n  'recommended_next_action',\n  'lead_status',\n  'handoff_reason',\n  'human_handoff_summary',\n  'calendar_action',\n  'safe_customer_reply_draft'\n];\n\nconst BORRADOR_SEGURO_POR_DEFECTO =\n  'Hi, thanks for your message. Our team is reviewing your request and will ' +\n  'get back to you shortly with the available options.';\n\nfunction construirLead(datosLLM, parseoCorrecto) {\n  const d = aObjeto(datosLLM);\n\n  const camposAusentes = parseoCorrecto\n    ? CAMPOS_ESPERADOS.filter((c) => d[c] === undefined || d[c] === null)\n    : ['valid_json'];\n\n  const cliente = aObjeto(d.customer);\n  const servicio = aObjeto(d.service_type);\n  const fechas = aObjeto(d.dates);\n  const grupo = aObjeto(d.group_size);\n  const intencion = aObjeto(d.customer_intent);\n  const reserva = aObjeto(d.booking_intent);\n  const urgencia = aObjeto(d.urgency);\n  const calendario = aObjeto(d.calendar_action);\n\n  const traceId = aTexto(origen.trace_id, aTexto(d.trace_id, String($execution.id)));\n\n  return {\n    // --- Trazabilidad: siempre desde el origen, nunca solo desde el LLM ----\n    client_id: aTexto(origen.client_id, aTexto(d.client_id, 'demo_tourism_operator')),\n    organization_id: aTexto(origen.organization_id, aTexto(d.organization_id, 'worklings_demo')),\n    trace_id: traceId,\n    source_channel: aTexto(origen.source_channel, aTexto(d.source_channel, 'unknown')),\n    received_at: aTexto(origen.received_at, aTexto(d.received_at, new Date().toISOString())),\n    response_mode: 'human_approval_required',\n\n    // --- Datos del cliente: el origen manda sobre lo que diga el LLM -------\n    customer: {\n      name: aTexto(origen.customer_name, aTexto(cliente.name)),\n      email: aTexto(origen.customer_email, aTexto(cliente.email)),\n      phone: aTexto(origen.customer_phone, aTexto(cliente.phone))\n    },\n    original_message: aTexto(origen.raw_message, aTexto(d.original_message)),\n\n    // --- Extraccion del agente --------------------------------------------\n    language: aTexto(d.language, 'unknown'),\n\n    service_type: {\n      label: aTexto(servicio.label, 'unknown'),\n      confidence: aNumero(servicio.confidence, 0),\n      evidence: aTexto(servicio.evidence)\n    },\n\n    dates: {\n      start: aTexto(fechas.start),\n      end: aTexto(fechas.end),\n      raw: aTexto(fechas.raw),\n      confidence: aNumero(fechas.confidence, 0),\n      needs_year_confirmation: Boolean(fechas.needs_year_confirmation)\n    },\n\n    group_size: {\n      total: aEnteroONulo(grupo.total),\n      adults: aEnteroONulo(grupo.adults),\n      children: aEnteroONulo(grupo.children),\n      raw: aTexto(grupo.raw),\n      confidence: aNumero(grupo.confidence, 0)\n    },\n\n    customer_intent: {\n      label: aTexto(intencion.label, parseoCorrecto ? 'unknown' : 'manual_review_required'),\n      summary: aTexto(intencion.summary, parseoCorrecto ? '' : 'AI extraction failed.'),\n      confidence: aNumero(intencion.confidence, 0)\n    },\n\n    booking_intent: {\n      label: aEnumerado(reserva.label, ['low', 'medium', 'high'], 'medium'),\n      score: aNumero(reserva.score, 0.5),\n      reason: aTexto(reserva.reason, parseoCorrecto ? '' : 'Manual review required.')\n    },\n\n    urgency: {\n      label: aEnumerado(urgencia.label, ['low', 'medium', 'high'], 'medium'),\n      reason: aTexto(urgencia.reason)\n    },\n\n    missing_information: parseoCorrecto\n      ? aLista(d.missing_information)\n      : ['manual_review_required'],\n\n    recommended_next_action: aTexto(\n      d.recommended_next_action,\n      'Manual review required: a human should read the original message.'\n    ),\n\n    lead_status: parseoCorrecto\n      ? aEnumerado(\n          d.lead_status,\n          ['new_lead', 'needs_human_review', 'needs_clarification', 'low_intent'],\n          'needs_human_review'\n        )\n      : 'needs_human_review',\n\n    // --- Handoff humano: siempre requerido en esta version -----------------\n    handoff_required: true,\n    handoff_reason: parseoCorrecto\n      ? aTexto(d.handoff_reason, 'Human approval required before any customer contact.')\n      : 'LLM output was not valid JSON.',\n    human_handoff_summary: aTexto(\n      d.human_handoff_summary,\n      'Manual review required. The Workling could not parse the request safely.'\n    ),\n\n    calendar_action: {\n      create_internal_event: true,\n      title: aTexto(calendario.title, 'Review booking request - ' + traceId),\n      description: aTexto(calendario.description),\n      suggested_duration_minutes: aNumero(calendario.suggested_duration_minutes, 15)\n    },\n\n    safe_customer_reply_draft: aTexto(\n      d.safe_customer_reply_draft,\n      BORRADOR_SEGURO_POR_DEFECTO\n    ),\n\n    // --- Banderas de seguridad: constantes, no negociables -----------------\n    // No se leen del modelo. Se escriben aqui. Es la garantia del sistema.\n    audit: {\n      customer_message_sent: false,\n      draft_created: true,\n      availability_confirmed: false,\n      price_confirmed: false,\n      booking_confirmed: false,\n      requires_human_approval: true\n    },\n    customer_message_sent: false,\n    availability_confirmed: false,\n    price_confirmed: false,\n    booking_confirmed: false,\n    human_approved: false,\n\n    // --- Senal de evaluacion ----------------------------------------------\n    agent_valid: parseoCorrecto && camposAusentes.length === 0,\n    validation_missing_fields: camposAusentes\n  };\n}\n\n// ---------------------------------------------------------------------------\n// Ejecucion\n// ---------------------------------------------------------------------------\n\nreturn $input.all().map((item) => {\n  const respuesta = extraerRespuestaLLM(item.json);\n  const parseado = parsearJSON(respuesta);\n  return { json: construirLead(parseado, esObjeto(parseado)) };\n});"
+      },
+      "id": "5edb7cd4-00aa-43ae-a921-06a786c37d64",
+      "name": "Validate Agent Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Lead_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "created_at": "={{$now}}",
+            "trace_id": "={{$json.trace_id}}",
+            "client_id": "={{$json.client_id}}",
+            "organization_id": "={{$json.organization_id}}",
+            "source_channel": "={{$json.source_channel}}",
+            "customer_name": "={{$json.customer.name}}",
+            "customer_email": "={{$json.customer.email}}",
+            "customer_phone": "={{$json.customer.phone}}",
+            "original_message": "={{$json.original_message}}",
+            "language": "={{$json.language}}",
+            "service_type": "={{$json.service_type.label}}",
+            "service_type_confidence": "={{$json.service_type.confidence}}",
+            "dates_raw": "={{$json.dates.raw}}",
+            "dates_start": "={{$json.dates.start}}",
+            "dates_end": "={{$json.dates.end}}",
+            "needs_year_confirmation": "={{$json.dates.needs_year_confirmation}}",
+            "group_size_total": "={{$json.group_size.total}}",
+            "adults": "={{$json.group_size.adults}}",
+            "children": "={{$json.group_size.children}}",
+            "customer_intent": "={{$json.customer_intent.label}}",
+            "customer_intent_confidence": "={{$json.customer_intent.confidence}}",
+            "booking_intent_label": "={{$json.booking_intent.label}}",
+            "booking_intent_score": "={{$json.booking_intent.score}}",
+            "urgency": "={{$json.urgency.label}}",
+            "missing_information": "={{$json.missing_information.join(', ')}}",
+            "recommended_next_action": "={{$json.recommended_next_action}}",
+            "lead_status": "={{$json.lead_status}}",
+            "handoff_required": "={{$json.handoff_required}}",
+            "handoff_reason": "={{$json.handoff_reason}}",
+            "calendar_event_id": "",
+            "safe_customer_reply_draft": "={{$json.safe_customer_reply_draft}}",
+            "customer_message_sent": "false",
+            "availability_confirmed": "false",
+            "price_confirmed": "false",
+            "booking_confirmed": "false",
+            "human_approved": "false",
+            "agent_valid": "={{$json.agent_valid}}",
+            "validation_missing_fields": "={{$json.validation_missing_fields.join(', ')}}",
+            "notes": "Hackathon demo run"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "9f4117d7-e658-4431-a824-330f16e4325f",
+      "name": "Append Lead to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -96,
+        0
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CALENDAR_ID",
+          "mode": "id"
+        },
+        "start": "={{$now.plus({minutes: 30})}}",
+        "end": "={{$now.plus({minutes: 45})}}",
+        "additionalFields": {
+          "description": "=Trace ID: {{$json.trace_id}}\nSource: {{$json.source_channel}}\n\nOriginal customer message:\n{{$json.original_message}}\n\nExtracted lead:\n- Service: {{$json.service_type.label}}\n- Dates: {{$json.dates.raw}}\n- Needs year confirmation: {{$json.dates.needs_year_confirmation}}\n- Group size: {{$json.group_size.total}} ({{$json.group_size.adults}} adults, {{$json.group_size.children}} children)\n- Customer intent: {{$json.customer_intent.label}}\n- Booking intent: {{$json.booking_intent.label}} / {{$json.booking_intent.score}}\n- Urgency: {{$json.urgency.label}}\n\nMissing information:\n{{$json.missing_information.join(', ')}}\n\nRecommended next action:\n{{$json.recommended_next_action}}\n\nHuman handoff summary:\n{{$json.human_handoff_summary}}\n\nSafe draft reply:\n{{$json.safe_customer_reply_draft}}\n\nSafety:\nCustomer message sent: NO\nAvailability confirmed: NO\nPrice confirmed: NO\nBooking confirmed: NO\nHuman approval required: YES",
+          "summary": "={{$json.calendar_action.title}}"
+        }
+      },
+      "id": "6d3c58b3-e2fc-4b30-9f54-4738739f26c0",
+      "name": "Create Internal Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.2,
+      "position": [
+        -96,
+        384
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=:large_yellow_circle: *Lead & Booking Workling handoff - Human approval required*\n\n*Trace ID:* {{$json.trace_id}}\n*Source:* {{$json.source_channel}}\n\n*Customer*\n• Name: {{$json.customer.name || 'Not provided'}}\n• Email: {{$json.customer.email || 'Not provided'}}\n• Phone: {{$json.customer.phone || 'Not provided'}}\n\n*Original message*\n\"{{$json.original_message}}\"\n\n*Extracted lead*\n• Service: {{$json.service_type.label}} (confidence {{$json.service_type.confidence}})\n• Dates: {{$json.dates.raw}}{{$json.dates.needs_year_confirmation ? ' — year not specified' : ''}}\n• Group: {{$json.group_size.total}} total — {{$json.group_size.adults}} adults, {{$json.group_size.children}} children\n• Intent: {{$json.customer_intent.label}}\n• Booking intent: {{$json.booking_intent.label}} — {{$json.booking_intent.score}}\n• Urgency: {{$json.urgency.label}}\n\n*Missing information*\n{{$json.missing_information.join(', ')}}\n\n*Recommended next action*\n{{$json.recommended_next_action}}\n\n*Why human review is needed*\n{{$json.handoff_reason}}\n\n*Safe customer reply draft*\n\"{{$json.safe_customer_reply_draft}}\"\n\n*Agent validation*\n• Output valid: {{$json.agent_valid}}\n• Missing fields: {{$json.validation_missing_fields.join(', ') || 'none'}}\n\n*Safety*\n:white_check_mark: Customer message sent: NO\n:white_check_mark: Availability confirmed: NO\n:white_check_mark: Price confirmed: NO\n:white_check_mark: Booking confirmed: NO\n:white_check_mark: Human approval required: YES\n\n_A chatbot answers. A Workling operates._",
+        "otherOptions": {}
+      },
+      "id": "fdb105ce-989c-46a6-a963-90a38e4b7502",
+      "name": "Send Slack Handoff",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -96,
+        576
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "c0511783-2987-41ce-9812-3836a150c02d",
+      "name": "Return Agent Output",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -96,
+        192
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Resumen legible del resultado de la ejecucion, para verlo de un vistazo en\n * n8n durante la demo sin tener que abrir el objeto completo.\n */\nconst lead = $input.first().json;\n\nreturn [{\n  json: {\n    status: 'completed',\n    trace_id: lead.trace_id,\n    source_channel: lead.source_channel,\n    lead_status: lead.lead_status,\n    agent_valid: lead.agent_valid,\n    validation_missing_fields: lead.validation_missing_fields,\n    customer_message_sent: false,\n    availability_confirmed: false,\n    price_confirmed: false,\n    booking_confirmed: false,\n    requires_human_approval: true,\n    note: 'Lead & Booking Workling demo completed. Check Google Sheets, Google Calendar and Slack. No customer message was sent.',\n    agent_output: lead\n  }\n}];"
+      },
+      "id": "49a39001-41ba-4fe2-b7ea-7db9863e3753",
+      "name": "Demo Completion Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        768
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sample Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Payload": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inbound Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Booking Request": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inbound Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Inbound Request": {
+      "main": [
+        [
+          {
+            "node": "LLM Extraction + Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Extraction + Classification": {
+      "main": [
+        [
+          {
+            "node": "Validate Agent Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Agent Output": {
+      "main": [
+        [
+          {
+            "node": "Append Lead to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Internal Calendar Event",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Slack Handoff",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Demo Completion Summary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Agent Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    {
+      "name": "hackathon"
+    },
+    {
+      "name": "worklings"
+    },
+    {
+      "name": "draft-only"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Lead & Booking Workling hackathon demo. Draft-only, human approval required. No customer message is ever sent."
+  }
+}
