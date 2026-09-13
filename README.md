@@ -1,3 +1,4 @@
+
 # Lead & Booking Workling
 
 **A multi-app AI agent that turns a messy tourism enquiry into a traceable operational workflow — and never talks to the customer on its own.**
@@ -140,70 +141,95 @@ Full failure-mode analysis: [`docs/reliability-brief.md`](docs/reliability-brief
 
 ## Evaluation
 
-Four scenarios were run against the live workflow. A–C test extraction across decreasing information. D tests the reliability boundary under real model failure.
+Ten executions were run against the live workflow between 22:36 and 23:50 on
+build day, across both ingestion channels and in two languages. Five ran during
+an unplanned model outage; five completed normally. All ten are traceable by
+`trace_id` in `Lead_Log`.
 
-### A — Strong lead, rich extraction ✅
+### Fault injection — unplanned, five consecutive executions
 
-```
-"Hi, do you have a 6-seat van available from 12–19 August for 2 adults and 2 kids?"
-```
+Not simulated. Mid-build the OpenAI account exhausted its quota and the API
+returned `429 insufficient_quota` for every call over a fourteen-minute window.
+Five consecutive executions (`41192`, `41193`, `41200`, `41201`, `41205`) reached
+the reliability boundary carrying an error instead of a lead. Every one of them:
 
-Run twice, changing one variable: trace `41214` omits the year, trace `41246` states it.
-
-| | `41214` (no year) | `41246` (year stated) |
-|---|---|---|
-| `service_type` | `van_rental`, conf. 1.0 | `van_rental`, conf. 1.0 |
-| `group_size` | 4 — 2 adults, 2 children | 4 — 2 adults, 2 children |
-| `booking_intent` | `high`, 0.9 | `high`, 0.9 |
-| `needs_year_confirmation` | `false` ← should be `true` | `false` ← correct |
-| `missing_information` | `availability_confirmation` | `availability_confirmation` |
-| `agent_valid` | `true` | `true` |
-| Sheets · Calendar · Slack | all delivered | all delivered |
-| `customer_message_sent` | `false` | `false` |
-
-**Two defects, characterised rather than just noticed.** Running the same scenario with and without the year isolates both: `needs_year_confirmation` returns `false` either way, so it is never set at all rather than merely wrong once; and `missing_information` returns the same single item in both runs, making it a deterministic prompt-coverage gap rather than model sampling noise. Neither is a pipeline failure — in both runs the lead was logged, the internal step prepared, the handoff delivered with the original message intact, and nothing sent to the customer.
-
-Both are open at submission. Fixing them is a prompt change, not an architecture change, and they were left unpatched rather than edited after the evaluation runs.
-
-Extraction was also consistent: two independent runs with different inputs produced identical classification, confidence, group breakdown and intent score.
-
-### B — Relative date, partial information
-
-```
-"Hello, we are 5 people interested in a boat tour next Friday. Do you have anything available?"
+```text
+completed without execution error        agent_valid = false
+wrote its row to Lead_Log                validation_missing_fields = valid_json
+escalated to needs_human_review          trace_id preserved
+delivered the Slack handoff intact       customer_message_sent = false
 ```
 
-Designed to test extraction when the date is relative and the party breakdown is absent. Expected: `boat_tour`, group size 5, and `missing_information` naming the exact date, the preferred time and the adult/child split.
+Five failures, five identical outcomes, across both the Google Form and the
+Manual Trigger channels. And once credit was restored, execution `41209`
+succeeded on the next attempt — **no node changed, no state cleared, nothing
+replayed by hand.** The system degraded deterministically and recovered on its
+own.
 
-*Designed and specified; not executed within the hackathon window.*
+### Successful extractions
 
-### C — Ambiguous enquiry, over-assumption test
+| Trace | Lang | Input | `service_type` | Group | Booking | `missing_information` |
+|---|---|---|---|---|---|---|
+| 41209 | es | 16–21 Sept, husband + dog, **no year** | `unknown` (0) | 2 | low 0.2 | `year_confirmation` |
+| 41213 | es | 15–21 Sept **2026**, husband + dog | `unknown` (0) | **3** | low 0.2 | `service_type` |
+| 41214 | en | 12–19 Aug, 6-seat van, 2+2, **no year** | `van_rental` (1.0) | 4 — 2+2 | high 0.9 | `availability_confirmation` |
+| 41227 | es | two groups of 2, rooms, 2026 | `unknown` (0) | 4 — 4 adults | medium 0.7 | `pickup_location`, `pickup_time`, `availability_confirmation` |
+| 41246 | en | 12–19 Aug **2026**, 6-seat van, 2+2 | `van_rental` (1.0) | 4 — 2+2 | high 0.9 | `availability_confirmation` |
 
+**Multilingual, without being asked for.** Spanish enquiries were classified
+correctly and drafted a Spanish reply; English ones drafted English. Language
+handling was never a requirement.
+
+**It refused to guess, three times on real input.** Three of the five enquiries
+never name a service. All three returned `service_type: unknown` with confidence
+0 and put the gap in `missing_information`, rather than inventing a plausible
+service — the behaviour most agents fail, demonstrated on live enquiries rather
+than a prepared test.
+
+**It reads indirect phrasing.** "Two groups of two people" resolved to 4 total,
+4 adults.
+
+### Three defects, open at submission
+
+**D1 — pets counted inconsistently.** The sharpest finding, and only visible
+because two comparable runs exist:
+
+```text
+41209  "con mi marido y nuestro perro"    ->  group_size.total = 2   (dog excluded)
+41213  "mi marido, yo y nuestro perrito"  ->  group_size.total = 3   (dog included)
 ```
-"Hi, how much is it?"
+
+Same language, same structure, opposite treatment. The schema has nowhere to
+record an animal, so the model resolves the ambiguity differently each time. For
+a tourism operator this is not cosmetic: party size drives vehicle and room
+allocation.
+
+**D2 — `needs_year_confirmation` missed once in five.** It fired correctly in
+`41209` and was correctly `false` in the three runs that state a year. It failed
+only in `41214`. Four of five correct; the mechanism works, the miss is real.
+
+**D3 — `missing_information` scope varies by service type.** Van rentals returned
+`availability_confirmation` alone; the accommodation enquiry returned
+`pickup_location`, `pickup_time` and `availability_confirmation`. The fields
+exist in the model's vocabulary and are emitted in some contexts and not others —
+a prompt-coverage gap, not an absent capability.
+
+All three are prompt-level, all three have known fixes, and all three were left
+unpatched rather than edited after the evaluation runs.
+
+### Summary
+
+```text
+Executions analysed                                10   (5 during outage, 5 normal)
+Pipeline behaved as designed                       10 / 10
+Reached a human with full context                  10 / 10
+customer_message_sent = true                        0
+Silent failures                                     0
+Partial or corrupt writes                           0
+Channels exercised                                  2    Google Form, Manual Trigger
+Languages exercised                                 2    en, es
+Extraction defects characterised                    3    all open, all prompt-level
 ```
-
-This is the scenario most agents fail: a system tuned for helpfulness invents a service type and answers a question it has no basis to answer. The prompt forbids it explicitly — `service_type` must be `unknown` with confidence 0 rather than a plausible guess, and `lead_status` must be `needs_clarification`.
-
-*Designed and specified; not executed within the hackathon window.*
-
-### D — Model failure ✅ (occurred naturally, not simulated)
-
-During testing the OpenAI account exhausted its quota mid-run (execution `41205`). The resulting behaviour is the fault-injection test, unsimulated:
-
-```
-Workflow completed without error          yes
-Row written to Lead_Log                   yes
-agent_valid                               false
-validation_missing_fields                 valid_json
-lead_status                               needs_human_review
-handoff_reason                            "LLM output was not valid JSON."
-Slack handoff delivered, message intact   yes
-trace_id preserved                        yes
-customer_message_sent                     false
-```
-
-The agent degraded to human review instead of failing silently, and the operator received the original enquiry with an explicit review flag. **A–C show the agent works. D shows what happens when it does not — the only question that matters before putting an agent in front of a real operator's customers.**
 
 ---
 
