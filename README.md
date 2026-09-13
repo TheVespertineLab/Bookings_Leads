@@ -148,9 +148,24 @@ Four scenarios were run against the live workflow. A–C test extraction across 
 "Hi, do you have a 6-seat van available from 12–19 August for 2 adults and 2 kids?"
 ```
 
-Service, dates, group breakdown and booking intent all extracted correctly. `agent_valid: true`. Row written, event created, handoff delivered, nothing sent to the customer.
+Run twice, changing one variable: trace `41214` omits the year, trace `41246` states it.
 
-One honest partial: `missing_information` returned `availability_confirmation` but did not flag pickup and drop-off location, which the prompt requests. Reported as a partial pass rather than a green tick.
+| | `41214` (no year) | `41246` (year stated) |
+|---|---|---|
+| `service_type` | `van_rental`, conf. 1.0 | `van_rental`, conf. 1.0 |
+| `group_size` | 4 — 2 adults, 2 children | 4 — 2 adults, 2 children |
+| `booking_intent` | `high`, 0.9 | `high`, 0.9 |
+| `needs_year_confirmation` | `false` ← should be `true` | `false` ← correct |
+| `missing_information` | `availability_confirmation` | `availability_confirmation` |
+| `agent_valid` | `true` | `true` |
+| Sheets · Calendar · Slack | all delivered | all delivered |
+| `customer_message_sent` | `false` | `false` |
+
+**Two defects, characterised rather than just noticed.** Running the same scenario with and without the year isolates both: `needs_year_confirmation` returns `false` either way, so it is never set at all rather than merely wrong once; and `missing_information` returns the same single item in both runs, making it a deterministic prompt-coverage gap rather than model sampling noise. Neither is a pipeline failure — in both runs the lead was logged, the internal step prepared, the handoff delivered with the original message intact, and nothing sent to the customer.
+
+Both are open at submission. Fixing them is a prompt change, not an architecture change, and they were left unpatched rather than edited after the evaluation runs.
+
+Extraction was also consistent: two independent runs with different inputs produced identical classification, confidence, group breakdown and intent score.
 
 ### B — Relative date, partial information
 
@@ -252,7 +267,7 @@ The invariants worth keeping — `trace_id`, tenant context, `response_mode`, th
 
 ## Demo
 
-**Two-minute video:** **← PEGAR ENLACE AQUÍ ANTES DEL PUSH FINAL**
+**Two-minute video:** https://drive.google.com/file/d/1bKJuVhyNoxCmqMZ5Av0KgTpLC2WfYYow/view?usp=sharing
 
 **Live form:** https://docs.google.com/forms/d/e/1FAIpQLSfQKWzZj0YquoPRAqEADLYDjczXCGf_KLi2sfxdwzg7VofyGg/viewform
 
